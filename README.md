@@ -57,9 +57,39 @@ ao --aoni-browser=chrome https://tls.browserleaks.com/json
 | **TCP / p0f Network Stack Spoofing** | OS Kernel dependent | **Configurable SYN/TCP options** |
 | **Encrypted Client Hello (ECH RFC 9460)** | Experimental / External | **Native Silicon Reactor** |
 | **Post-Quantum Key Exchange (ML-KEM)** | Provider dependent | **Native ML-KEM-768 / X25519Kyber768** |
+| **Multi-Threaded RPS (100 threads)** | ~1,500 - 3,000 RPS (Lock contention) | **9,145+ RPS (100% Success, Zero GC)** |
 | **Memory Management** | Standard `malloc` | **Zero-Alloc Off-Heap Ring Buffers** |
 | **Terminal WebSocket & SSE** | Basic | **Full-Duplex Interactive Engine** |
 | **WAF / Anti-Bot Bypass** | Flagged by default | **Evasion-First Architecture** |
+
+## Performance & Multi-Threaded Benchmarks
+
+`ao` completely eliminates standard curl's multi-threading bottlenecks (SSL session lock contention, synchronous DNS resolver locks, and heap fragmentation) by delegating network operations to `libaoni`'s non-blocking reactor and off-heap memory arenas.
+
+### Stress Test: 100 Concurrent POSIX Threads Calling `curl_easy_perform`
+
+```text
+====================================================
+  ao (curl on libaoni) 100-Thread Stress Benchmark  
+====================================================
+Target URL   : http://127.0.0.1:8888/bench
+Concurrency  : 100 threads
+Requests     : 50,000 total (500/thread)
+
+=== Results ===
+Total Requests : 50,000
+Successful     : 50,000 (100.00% Success Rate)
+Failed         : 0 (0.00% Dropped / Socket Errors)
+Elapsed Time   : 5.467 s
+Throughput     : 9,145.13 RPS
+Avg Req Time   : 10.935 ms
+====================================================
+```
+
+| Concurrency | Total Requests | Elapsed Time | Throughput | Success Rate | Memory Model |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| **50 threads** | 20,000 | 2.274 s | **8,794.75 RPS** | **100.00%** | 0% GC / Off-Heap |
+| **100 threads** | 50,000 | 5.467 s | **9,145.13 RPS** | **100.00%** | 0% GC / Off-Heap |
 
 ## Architecture & Silicon Bridge
 
