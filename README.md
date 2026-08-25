@@ -182,16 +182,16 @@ The compiled binary will be generated at `build/src/ao` (Linux/macOS) or `build/
 
 ```
 ao/
-├── include/         // Public curl and client API headers (curl/curl.h)
-├── lib/             // Core engine implementation
+├── include/          // Public curl and client API headers (curl/curl.h)
+├── lib/              // Core engine implementation
 │   ├── aoni_bridge.c // Bridge implementation connecting libcurl to libaoni
 │   ├── aoni_bridge.h // Bridge definitions and configuration contracts
-│   └── ...          // Protocol handlers, transfer state machines
-├── src/             // CLI client frontend (command-line parsing, terminal UX)
-├── CMake/           // CMake toolchains and feature detection modules
-├── docs/            // Technical specifications and protocol documentation
-├── scripts/         // Code generation and verification scripts
-└── tests/           // Integration and compliance test suite
+│   └── ...           // Protocol handlers, transfer state machines
+├── src/              // CLI client frontend (command-line parsing, terminal UX)
+├── CMake/            // CMake toolchains and feature detection modules
+├── docs/             // Technical specifications and protocol documentation
+├── scripts/          // Code generation and verification scripts
+└── tests/            // Integration and compliance test suite
 ```
 
 ## License
