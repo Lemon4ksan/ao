@@ -156,27 +156,59 @@ ao -X POST https://api.target.com/v1/telemetry \
 ## Building from Source
 
 ### Prerequisites
+* **Go Compiler** `>= 1.22` (for compiling `libaoni`)
 * **CMake** `>= 3.16`
 * **C Compiler** (GCC `>= 8`, Clang `>= 10`, or MSVC 2019+)
-* **libaoni** headers and library (`libaoni.a` / `aoni.lib`)
 
-### Build Instructions
+### Step 1: Build `libaoni` Engine
+
+`ao` requires the compiled `libaoni` shared library and headers.
 
 ```bash
-# 1. Clone repository
-git clone https://github.com/Lemon4ksan/ao.git
+# Clone and build libaoni
+git clone https://github.com/lemon4ksan/aoni
+cd aoni
+
+# Compile libaoni.so (Linux/macOS) or aoni.dll (Windows)
+make lib
+```
+
+This generates:
+- `aoni/bin/libaoni.so` (or `aoni.dll` / `libaoni.dylib`)
+- `aoni/include/aoni.h` (C99 ABI interface)
+
+### Step 2: Build `ao` (`curl` powered by `libaoni`)
+
+Place `ao` adjacent to `aoni` (or set `-DAONI_LIB=/path/to/libaoni.so`):
+
+```bash
+# Clone ao repository
+git clone https://github.com/Lemon4ksan/ao
 cd ao
 
-# 2. Configure build with CMake
+# Configure build with CMake (auto-detects ../aoni/bin/libaoni.so)
 cmake -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_CURL_EXE=ON
 
-# 3. Compile binary
+# Compile the ao binary
 cmake --build build --config Release -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 ```
 
-The compiled binary will be generated at `build/src/ao` (Linux/macOS) or `build/src/Release/ao.exe` (Windows).
+The compiled binary will be located at:
+- `build/src/ao` (Linux / macOS)
+- `build/src/Release/ao.exe` (Windows)
+
+### Verifying the Build
+
+Run a stealth TLS test to verify that `ao` is executing through `libaoni`:
+
+```bash
+./build/src/ao -s https://tls.peet.ws/api/all | grep -E "ja4|http_version"
+# Output should show:
+# "http_version": "h2",
+# "ja4": "t13d1515h2_8daaf6152771_22334254f9f7"
+```
 
 ## Repository Layout
 
