@@ -75,6 +75,39 @@ static CURLcode ao_deliver_body(struct Curl_easy *data, const uint8_t *buf, size
   return CURLE_OK;
 }
 
+static aoni_client_t g_shared_http_client = NULL;
+static aoni_client_t g_shared_tls_client = NULL;
+static pthread_mutex_t g_client_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static aoni_client_t ao_get_client(const aoni_config_t *cfg, bool is_tls, bool *is_reused)
+{
+  *is_reused = false;
+  if(!cfg->proxy_url) {
+    pthread_mutex_lock(&g_client_pool_lock);
+    if(is_tls) {
+      if(!g_shared_tls_client) {
+        g_shared_tls_client = aoni_client_create(cfg);
+      }
+      pthread_mutex_unlock(&g_client_pool_lock);
+      if(g_shared_tls_client) {
+        *is_reused = true;
+        return g_shared_tls_client;
+      }
+    }
+    else {
+      if(!g_shared_http_client) {
+        g_shared_http_client = aoni_client_create(cfg);
+      }
+      pthread_mutex_unlock(&g_client_pool_lock);
+      if(g_shared_http_client) {
+        *is_reused = true;
+        return g_shared_http_client;
+      }
+    }
+  }
+  return aoni_client_create(cfg);
+}
+
 CURLcode Curl_aoni_perform(struct Curl_easy *data)
 {
   const char *url;
@@ -91,6 +124,8 @@ CURLcode Curl_aoni_perform(struct Curl_easy *data)
   aoni_client_t client;
   aoni_task_t task;
   int32_t status;
+  bool is_tls = false;
+  bool is_reused = false;
   CURLcode result = CURLE_OK;
 
   if(!data)
@@ -112,14 +147,18 @@ CURLcode Curl_aoni_perform(struct Curl_easy *data)
   else
     cfg.timeout_ms = 30000;
 
-  cfg.browser_profile = AONI_BROWSER_CHROME; /* Default to Chrome uTLS Profile */
+  is_tls = (curl_strnequal(url, "https://", 8) || curl_strnequal(url, "wss://", 6));
+  if(is_tls)
+    cfg.browser_profile = AONI_BROWSER_CHROME; /* Default to Chrome uTLS Profile for TLS */
+  else
+    cfg.browser_profile = AONI_BROWSER_NONE;   /* Plaintext for HTTP */
 
   proxy_url = CURL_EASY_STR(data, STRING_PROXY);
   if(proxy_url && *proxy_url) {
     cfg.proxy_url = (char *)(uintptr_t)proxy_url;
   }
 
-  client = aoni_client_create(&cfg);
+  client = ao_get_client(&cfg, is_tls, &is_reused);
   if(!client)
     return CURLE_OUT_OF_MEMORY;
 
@@ -221,7 +260,8 @@ CURLcode Curl_aoni_perform(struct Curl_easy *data)
   aoni_task_free(&task);
   free(headers_buf);
   free(resp_hdr_buf);
-  aoni_client_destroy(client);
+  if(!is_reused)
+    aoni_client_destroy(client);
 
   return result;
 }
