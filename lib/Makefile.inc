@@ -172,6 +172,7 @@ LIB_VSSH_HFILES =    \
   vssh/ssh.h
 
 LIB_CFILES =         \
+  aoni_bridge.c      \
   altsvc.c           \
   amigaos.c          \
   api.c              \
@@ -301,6 +302,7 @@ LIB_CFILES =         \
   ws.c
 
 LIB_HFILES =         \
+  aoni_bridge.h      \
   altsvc.h           \
   amigaos.h          \
   api.h              \

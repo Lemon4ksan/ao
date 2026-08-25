@@ -75,6 +75,7 @@
 #include "bufref.h"
 #include "altsvc.h"
 #include "hsts.h"
+#include "aoni_bridge.h"
 
 #include "easy_lock.h"
 
@@ -747,6 +748,13 @@ static CURLcode easy_perform(struct Curl_easy *data, bool events)
   if(data->set.errorbuffer)
     /* clear this as early as possible */
     data->set.errorbuffer[0] = 0;
+
+  {
+    const char *target_url = CURL_EASY_STR(data, STRING_SET_URL);
+    if(Curl_aoni_is_supported_url(target_url)) {
+      return Curl_aoni_perform(data);
+    }
+  }
 
   data->state.os_errno = 0;
 

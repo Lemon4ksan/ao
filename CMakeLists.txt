@@ -1906,6 +1906,12 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
   endif()
 endif()
 
+find_library(AONI_LIB aoni PATHS "${PROJECT_SOURCE_DIR}/../aoni/bin" NO_DEFAULT_PATH)
+if(NOT AONI_LIB)
+  set(AONI_LIB "${PROJECT_SOURCE_DIR}/../aoni/bin/libaoni.so")
+endif()
+list(APPEND CURL_LIBS "${AONI_LIB}")
+
 if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")  # MSVC but exclude clang-cl
   set_property(DIRECTORY APPEND PROPERTY COMPILE_OPTIONS "-MP")  # Parallel compilation
 endif()
