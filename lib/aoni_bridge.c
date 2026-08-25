@@ -79,7 +79,7 @@ static aoni_client_t g_shared_http_client = NULL;
 static aoni_client_t g_shared_tls_client = NULL;
 static pthread_mutex_t g_client_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static aoni_client_t ao_get_client(const aoni_config_t *cfg, bool is_tls, bool *is_reused)
+static aoni_client_t ao_get_client(aoni_config_t *cfg, bool is_tls, bool *is_reused)
 {
   *is_reused = false;
   if(!cfg->proxy_url) {
