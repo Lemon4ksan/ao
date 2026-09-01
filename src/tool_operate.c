@@ -53,6 +53,8 @@
 #endif
 
 #include "tool_cfgable.h"
+#include "tool_bench.h"
+#include <aoni.h>
 #include "tool_cb_hdr.h"
 #include "tool_cb_prg.h"
 #include "tool_cb_wrt.h"
@@ -2329,6 +2331,174 @@ static CURLcode create_transfer(CURLSH *share,
   return result;
 }
 
+static CURLcode turbo_single_transfer(struct OperationConfig *config)
+{
+  const char *url;
+  const char *method = "GET";
+  char *headers_buf = NULL;
+  size_t headers_cap = 8192;
+  size_t headers_len = 0;
+  struct curl_slist *h;
+  aoni_config_t cfg;
+  aoni_client_t client;
+  aoni_task_t task;
+  uint8_t scratch_hdrs[8192];
+  uint8_t browser_profile = AONI_BROWSER_NONE;
+  const char *proxy_url = NULL;
+  FILE *out = stdout;
+  FILE *hdr_out = NULL;
+  bool close_out = FALSE;
+  bool close_hdr_out = FALSE;
+  int32_t status;
+  bool is_tls;
+
+  if(!config || !config->url_list || !config->url_list->url)
+    return CURLE_URL_MALFORMAT;
+
+  url = config->url_list->url;
+  is_tls = (curl_strnequal(url, "https://", 8) || curl_strnequal(url, "wss://", 6));
+
+  /* Determine browser profile */
+  if(config->aoni_browser && *config->aoni_browser) {
+    if(curl_strequal(config->aoni_browser, "chrome"))
+      browser_profile = AONI_BROWSER_CHROME;
+    else if(curl_strequal(config->aoni_browser, "firefox"))
+      browser_profile = AONI_BROWSER_FIREFOX;
+    else if(curl_strequal(config->aoni_browser, "safari"))
+      browser_profile = AONI_BROWSER_SAFARI;
+    else if(curl_strequal(config->aoni_browser, "none"))
+      browser_profile = AONI_BROWSER_NONE;
+    else
+      browser_profile = AONI_BROWSER_CHROME;
+  }
+  else if(is_tls) {
+    browser_profile = AONI_BROWSER_CHROME;
+  }
+
+  if(config->proxy && *config->proxy)
+    proxy_url = config->proxy;
+
+  /* Determine method */
+  if(config->customrequest && *config->customrequest)
+    method = config->customrequest;
+  else if(config->postfields)
+    method = "POST";
+  else if(config->no_body)
+    method = "HEAD";
+
+  /* Serialize headers */
+  headers_buf = (char *)malloc(headers_cap);
+  if(!headers_buf)
+    return CURLE_OUT_OF_MEMORY;
+  headers_buf[0] = '\0';
+
+  for(h = config->headers; h; h = h->next) {
+    if(h->data && *h->data) {
+      size_t line_len = strlen(h->data);
+      if(headers_len + line_len + 4 >= headers_cap) {
+        size_t new_cap = (headers_cap + line_len + 4) * 2;
+        char *new_buf = (char *)realloc(headers_buf, new_cap);
+        if(!new_buf)
+          break;
+        headers_buf = new_buf;
+        headers_cap = new_cap;
+      }
+      memcpy(headers_buf + headers_len, h->data, line_len);
+      headers_len += line_len;
+      memcpy(headers_buf + headers_len, "\r\n", 2);
+      headers_len += 2;
+      headers_buf[headers_len] = '\0';
+    }
+  }
+
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.max_conns_per_host = 256;
+  cfg.concurrency = 256;
+  cfg.timeout_ms = 30000;
+  cfg.browser_profile = browser_profile;
+  cfg.enable_http2 = 1;
+  cfg.enable_http3 = (config->httpversion >= CURL_HTTP_VERSION_3);
+  cfg.proxy_url = proxy_url;
+
+  client = aoni_client_create(&cfg);
+  if(!client) {
+    free(headers_buf);
+    return CURLE_OUT_OF_MEMORY;
+  }
+
+  memset(&task, 0, sizeof(task));
+  task.method = method;
+  task.method_len = strlen(method);
+  task.url = url;
+  task.url_len = strlen(url);
+  task.headers_raw = (const uint8_t *)headers_buf;
+  task.headers_len = headers_len;
+  task.body_ptr = (const uint8_t *)config->postfields;
+  task.body_len = config->postfields ? strlen(config->postfields) : 0;
+
+  /* Response buffers: Use Mode 3 (Off-Heap auto-allocation) for arbitrary response body size */
+  task.resp_buf_ptr = NULL;
+  task.resp_buf_cap = 0;
+  task.resp_headers_ptr = scratch_hdrs;
+  task.resp_headers_cap = sizeof(scratch_hdrs);
+
+  status = aoni_client_do(client, &task);
+  (void)status;
+
+  /* Open output file if specified */
+  if(config->url_list->outfile && *config->url_list->outfile) {
+    out = fopen(config->url_list->outfile, "wb");
+    if(out)
+      close_out = TRUE;
+    else
+      out = stdout;
+  }
+
+  if(config->headerfile && *config->headerfile) {
+    hdr_out = fopen(config->headerfile, "wb");
+    if(hdr_out)
+      close_hdr_out = TRUE;
+  }
+
+  /* Output headers if -i/--include or headerfile specified */
+  if(task.resp_headers_len > 0) {
+    if(hdr_out)
+      fwrite(task.resp_headers_ptr, 1, task.resp_headers_len, hdr_out);
+    if(config->show_headers)
+      fwrite(task.resp_headers_ptr, 1, task.resp_headers_len, out);
+  }
+
+  /* Output body */
+  if(task.resp_buf_len > 0 && !config->no_body) {
+    fwrite(task.resp_buf_ptr, 1, task.resp_buf_len, out);
+  }
+
+  if(close_out && out)
+    fclose(out);
+  if(close_hdr_out && hdr_out)
+    fclose(hdr_out);
+
+  if(global->tracetype) {
+    curl_mfprintf(tool_stderr, "* Status: %d | DNS: %.2fms | TLS: %.2fms | TTFB: %.2fms | Total: %.2fms\n",
+                  task.status_code,
+                  (double)task.dns_time_ns / 1000000.0,
+                  (double)task.tls_time_ns / 1000000.0,
+                  (double)task.ttfb_ns / 1000000.0,
+                  (double)task.total_time_ns / 1000000.0);
+  }
+
+  aoni_task_free(&task);
+  aoni_client_destroy(client);
+  free(headers_buf);
+
+  if(task.error_code == AONI_OK)
+    return CURLE_OK;
+  else if(task.error_code == AONI_ERR_TIMEOUT)
+    return CURLE_OPERATION_TIMEDOUT;
+  else
+    return CURLE_COULDNT_CONNECT;
+}
+
 static CURLcode run_all_transfers(CURLSH *share,
                                   CURLcode result)
 {
@@ -2339,7 +2509,21 @@ static CURLcode run_all_transfers(CURLSH *share,
 
   /* Time to actually do the transfers */
   if(!result) {
-    if(global->parallel)
+    if(global->bench)
+      result = bench_transfers(share);
+    else if(!global->parallel &&
+            !global->libcurl &&
+            global->first &&
+            !global->first->next &&
+            global->first->url_list &&
+            !global->first->url_list->next &&
+            (curl_strnequal(global->first->url_list->url, "http://", 7) ||
+             curl_strnequal(global->first->url_list->url, "https://", 8) ||
+             curl_strnequal(global->first->url_list->url, "ws://", 5) ||
+             curl_strnequal(global->first->url_list->url, "wss://", 6))) {
+      result = turbo_single_transfer(global->first);
+    }
+    else if(global->parallel)
       result = parallel_transfers(share);
     else
       result = serial_transfers(share);

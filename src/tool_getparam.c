@@ -78,9 +78,18 @@ static const struct LongShort aliases[] = {
   {"alpn",                       ARG_BOOL|ARG_NO|ARG_TLS, ' ', C_ALPN},
   {"alt-svc",                    ARG_STRG, ' ', C_ALT_SVC},
   {"anyauth",                    ARG_NONE, ' ', C_ANYAUTH},
+  {"aoni-browser",               ARG_STRG, ' ', C_AONI_BROWSER},
+  {"aoni-pq",                    ARG_STRG, ' ', C_AONI_PQ},
   {"append",                     ARG_BOOL, 'a', C_APPEND},
   {"aws-sigv4",                  ARG_STRG, ' ', C_AWS_SIGV4},
   {"basic",                      ARG_BOOL, ' ', C_BASIC},
+  {"bench",                      ARG_BOOL, ' ', C_BENCH},
+  {"bench-concurrency",          ARG_UNUM, ' ', C_BENCH_CONCURRENCY},
+  {"bench-duration",             ARG_STRG, ' ', C_BENCH_DURATION},
+  {"bench-pipeline",             ARG_BOOL, ' ', C_BENCH_PIPELINE},
+  {"bench-rate",                 ARG_UNUM, ' ', C_BENCH_RATE},
+  {"bench-requests",             ARG_UNUM, ' ', C_BENCH_REQUESTS},
+  {"bench-threads",              ARG_UNUM, ' ', C_BENCH_THREADS},
   {"buffer",                     ARG_BOOL|ARG_NO, 'N', C_BUFFER},
   {"ca-native",                  ARG_BOOL|ARG_TLS, ' ', C_CA_NATIVE},
   {"cacert",                     ARG_FILE|ARG_TLS, ' ', C_CACERT},
@@ -92,6 +101,7 @@ static const struct LongShort aliases[] = {
   {"clobber",                    ARG_BOOL|ARG_NO, ' ', C_CLOBBER},
   {"compressed",                 ARG_BOOL, ' ', C_COMPRESSED},
   {"compressed-ssh",             ARG_BOOL, ' ', C_COMPRESSED_SSH},
+  {"concurrency",                ARG_UNUM, ' ', C_BENCH_CONCURRENCY},
   {"config",                     ARG_FILE, 'K', C_CONFIG},
   {"connect-timeout",            ARG_SECS, ' ', C_CONNECT_TIMEOUT},
   {"connect-to",                 ARG_STRG, ' ', C_CONNECT_TO},
@@ -123,6 +133,7 @@ static const struct LongShort aliases[] = {
   {"doh-url",                    ARG_STRG, ' ', C_DOH_URL},
   {"dump-ca-embed",              ARG_NONE|ARG_TLS, ' ', C_DUMP_CA_EMBED},
   {"dump-header",                ARG_FILE, 'D', C_DUMP_HEADER},
+  {"duration",                   ARG_STRG, ' ', C_BENCH_DURATION},
   {"ech",                        ARG_STRG|ARG_TLS, ' ', C_ECH},
   {"egd-file",                   ARG_STRG|ARG_DEPR, ' ', C_EGD_FILE},
   {"engine",                     ARG_STRG|ARG_TLS, ' ', C_ENGINE},
@@ -232,6 +243,7 @@ static const struct LongShort aliases[] = {
   {"parallel-max-host",          ARG_UNUM, ' ', C_PARALLEL_HOST},
   {"pass",                       ARG_STRG|ARG_CLEAR, ' ', C_PASS},
   {"path-as-is",                 ARG_BOOL, ' ', C_PATH_AS_IS},
+  {"pipeline",                   ARG_BOOL, ' ', C_BENCH_PIPELINE},
   {"pinnedpubkey",               ARG_STRG|ARG_TLS, ' ', C_PINNEDPUBKEY},
   {"post301",                    ARG_BOOL, ' ', C_POST301},
   {"post302",                    ARG_BOOL, ' ', C_POST302},
@@ -293,6 +305,7 @@ static const struct LongShort aliases[] = {
   {"remove-on-error",            ARG_BOOL, ' ', C_REMOVE_ON_ERROR},
   {"request",                    ARG_STRG, 'X', C_REQUEST},
   {"request-target",             ARG_STRG, ' ', C_REQUEST_TARGET},
+  {"requests",                   ARG_UNUM, ' ', C_BENCH_REQUESTS},
   {"resolve",                    ARG_STRG, ' ', C_RESOLVE},
   {"retry",                      ARG_UNUM, ' ', C_RETRY},
   {"retry-all-errors",           ARG_BOOL, ' ', C_RETRY_ALL_ERRORS},
@@ -342,6 +355,7 @@ static const struct LongShort aliases[] = {
 #endif
   {"tftp-blksize",               ARG_UNUM, ' ', C_TFTP_BLKSIZE},
   {"tftp-no-options",            ARG_BOOL, ' ', C_TFTP_NO_OPTIONS},
+  {"threads",                    ARG_UNUM, ' ', C_BENCH_THREADS},
   {"time-cond",                  ARG_STRG, 'z', C_TIME_COND},
   {"tls-earlydata",              ARG_BOOL|ARG_TLS, ' ', C_TLS_EARLYDATA},
   {"tls-max",                    ARG_STRG|ARG_TLS, ' ', C_TLS_MAX},
@@ -1082,6 +1096,33 @@ static ParameterError set_rate(const char *nextarg)
   return err;
 }
 
+static ParameterError parse_bench_duration(const char *str, timediff_t *out_ms)
+{
+  char *endptr = NULL;
+  double val;
+  if(!str || !*str)
+    return PARAM_BAD_USE;
+  val = strtod(str, &endptr);
+  if(val <= 0)
+    return PARAM_BAD_NUMERIC;
+  if(endptr && *endptr) {
+    if(curl_strequal(endptr, "ms"))
+      *out_ms = (timediff_t)val;
+    else if(curl_strequal(endptr, "s"))
+      *out_ms = (timediff_t)(val * 1000.0);
+    else if(curl_strequal(endptr, "m"))
+      *out_ms = (timediff_t)(val * 60.0 * 1000.0);
+    else if(curl_strequal(endptr, "h"))
+      *out_ms = (timediff_t)(val * 3600.0 * 1000.0);
+    else
+      return PARAM_BAD_USE;
+  }
+  else {
+    *out_ms = (timediff_t)(val * 1000.0);
+  }
+  return PARAM_OK;
+}
+
 const struct LongShort *findlongopt(const char *opt)
 {
   struct LongShort key;
@@ -1776,30 +1817,20 @@ static ParameterError opt_none(struct OperationConfig *config,
     sethttpver(config, CURL_HTTP_VERSION_1_1);
     break;
   case C_HTTP2: /* --http2 */
-    /* HTTP version 2.0 */
-    if(!feature_http2)
-      return PARAM_LIBCURL_DOESNT_SUPPORT;
+    /* HTTP version 2.0 (powered by libaoni) */
     sethttpver(config, CURL_HTTP_VERSION_2_0);
     break;
   case C_HTTP2_PRIOR_KNOWLEDGE: /* --http2-prior-knowledge */
-    /* HTTP version 2.0 over clean TCP */
-    if(!feature_http2)
-      return PARAM_LIBCURL_DOESNT_SUPPORT;
+    /* HTTP version 2.0 over clean TCP (powered by libaoni) */
     sethttpver(config, CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
     break;
-  case C_HTTP3: /* --http3: */
-    /* Try HTTP/3, allow fallback */
-    if(!feature_http3)
-      return PARAM_LIBCURL_DOESNT_SUPPORT;
-    else
-      sethttpver(config, CURL_HTTP_VERSION_3);
+  case C_HTTP3: /* --http3 */
+    /* Try HTTP/3, allow fallback (powered by libaoni) */
+    sethttpver(config, CURL_HTTP_VERSION_3);
     break;
   case C_HTTP3_ONLY: /* --http3-only */
-    /* Try HTTP/3 without fallback */
-    if(!feature_http3)
-      return PARAM_LIBCURL_DOESNT_SUPPORT;
-    else
-      sethttpver(config, CURL_HTTP_VERSION_3ONLY);
+    /* Try HTTP/3 without fallback (powered by libaoni) */
+    sethttpver(config, CURL_HTTP_VERSION_3ONLY);
     break;
   case C_TLSV1: /* --tlsv1 */
     err = opt_sslver(config, 1);
@@ -2214,6 +2245,13 @@ static ParameterError opt_bool(struct OperationConfig *config,
   case C_PARALLEL: /* --parallel */
     global->parallel = toggle;
     break;
+  case C_BENCH: /* --bench */
+    global->bench = toggle;
+    break;
+  case C_BENCH_PIPELINE: /* --bench-pipeline / --pipeline */
+    global->bench_pipeline = toggle;
+    global->bench = TRUE;
+    break;
   case C_PARALLEL_IMMEDIATE:   /* --parallel-immediate */
     global->parallel_connect = toggle;
     break;
@@ -2439,6 +2477,18 @@ static ParameterError opt_unum(struct OperationConfig *config,
     else
       global->parallel_max = (unsigned short)val;
     break;
+  case C_BENCH_CONCURRENCY: /* --bench-concurrency / --concurrency */
+    global->bench_concurrency = (val > 0) ? (unsigned int)val : 500;
+    break;
+  case C_BENCH_THREADS: /* --bench-threads / --threads */
+    global->bench_threads = (unsigned int)val;
+    break;
+  case C_BENCH_REQUESTS: /* --bench-requests / --requests */
+    global->bench_requests = (curl_off_t)val;
+    break;
+  case C_BENCH_RATE: /* --bench-rate */
+    global->bench_rate = (unsigned int)val;
+    break;
   default:
     DEBUGASSERT(0);
     return PARAM_OPTION_UNKNOWN;
@@ -2549,6 +2599,15 @@ static ParameterError opt_string(struct OperationConfig *config,
     break;
   case C_RATE:
     err = set_rate(nextarg);
+    break;
+  case C_BENCH_DURATION: /* --bench-duration / --duration */
+    err = parse_bench_duration(nextarg, &global->bench_duration_ms);
+    break;
+  case C_AONI_BROWSER: /* --aoni-browser */
+    err = getstr(&config->aoni_browser, nextarg, DENY_BLANK);
+    break;
+  case C_AONI_PQ: /* --aoni-pq */
+    err = getstr(&config->aoni_pq, nextarg, DENY_BLANK);
     break;
   case C_CREATE_FILE_MODE: /* --create-file-mode */
     err = oct2nummax(&config->create_file_mode, nextarg, 0777);

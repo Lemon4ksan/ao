@@ -192,6 +192,8 @@ static void free_config_fields(struct OperationConfig *config)
   curlx_safefree(config->ech_config);
   curlx_safefree(config->ech_public);
   curlx_safefree(config->knownhosts);
+  curlx_safefree(config->aoni_browser);
+  curlx_safefree(config->aoni_pq);
 }
 
 void config_free(struct OperationConfig *config)
@@ -321,6 +323,12 @@ CURLcode globalconf_init(void)
   global->showerror = FALSE;          /* show errors when silent */
   global->styled_output = TRUE;       /* enable detection */
   global->parallel_max = PARALLEL_DEFAULT;
+  global->bench = FALSE;
+  global->bench_concurrency = 500;
+  global->bench_threads = 0;
+  global->bench_duration_ms = 10000;
+  global->bench_requests = 0;
+  global->bench_rate = 0;
 
   /* Allocate the initial operate config */
   global->first = global->last = config_alloc();

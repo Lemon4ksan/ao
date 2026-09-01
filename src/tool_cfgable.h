@@ -80,6 +80,8 @@ struct OperationConfig {
   char *proxyuserpwd;
   char *proxy;
   char *noproxy;
+  char *aoni_browser;
+  char *aoni_pq;
   char *knownhosts;
   char *mail_from;
   struct curl_slist *mail_rcpt;
@@ -346,6 +348,8 @@ struct GlobalConfig {
 #endif
   BIT(parallel);
   BIT(parallel_connect);
+  BIT(bench);
+  BIT(bench_pipeline);
   BIT(fail_early);                /* exit on first transfer error */
   BIT(styled_output);             /* enable fancy output style detection */
   BIT(trace_fopened);
@@ -356,6 +360,11 @@ struct GlobalConfig {
   BIT(noprogress);                /* do not show progress bar */
   BIT(isatty);                    /* Updated internally if output is a tty */
   BIT(trace_set);                 /* --trace-config has been used */
+  unsigned int bench_concurrency; /* -c: concurrent in-flight requests */
+  unsigned int bench_threads;     /* -t: number of worker threads */
+  timediff_t bench_duration_ms;   /* -d: benchmark duration in ms */
+  curl_off_t bench_requests;      /* -n: maximum total requests */
+  unsigned int bench_rate;        /* --bench-rate: target RPS rate limit */
 };
 
 struct OperationConfig *config_alloc(void);

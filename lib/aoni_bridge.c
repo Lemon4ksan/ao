@@ -13,6 +13,28 @@
 
 #include <aoni.h>
 
+#if defined(__GNUC__) || defined(__clang__)
+#define AO_TLS __thread
+#elif defined(_MSC_VER)
+#define AO_TLS __declspec(thread)
+#else
+#define AO_TLS
+#endif
+
+#define AO_SCRATCH_HDR_CAP 8192
+#define AO_SCRATCH_RESP_HDR_CAP 16384
+#define AO_SCRATCH_RESP_BODY_CAP 65536
+
+typedef struct {
+  char req_headers[AO_SCRATCH_HDR_CAP];
+  uint8_t resp_headers[AO_SCRATCH_RESP_HDR_CAP];
+  uint8_t resp_body[AO_SCRATCH_RESP_BODY_CAP];
+} ao_thread_scratch_t;
+
+static AO_TLS ao_thread_scratch_t tl_scratch;
+static AO_TLS aoni_client_t tl_http_client = NULL;
+static AO_TLS aoni_client_t tl_tls_client = NULL;
+
 bool Curl_aoni_is_supported_url(const char *url)
 {
   if(!url)
@@ -75,34 +97,22 @@ static CURLcode ao_deliver_body(struct Curl_easy *data, const uint8_t *buf, size
   return CURLE_OK;
 }
 
-static aoni_client_t g_shared_http_client = NULL;
-static aoni_client_t g_shared_tls_client = NULL;
-static pthread_mutex_t g_client_pool_lock = PTHREAD_MUTEX_INITIALIZER;
-
-static aoni_client_t ao_get_client(aoni_config_t *cfg, bool is_tls, bool *is_reused)
+aoni_client_t Curl_aoni_get_thread_client(aoni_config_t *cfg, bool is_tls)
 {
-  *is_reused = false;
   if(!cfg->proxy_url) {
-    pthread_mutex_lock(&g_client_pool_lock);
     if(is_tls) {
-      if(!g_shared_tls_client) {
-        g_shared_tls_client = aoni_client_create(cfg);
+      if(!tl_tls_client) {
+        tl_tls_client = aoni_client_create(cfg);
       }
-      pthread_mutex_unlock(&g_client_pool_lock);
-      if(g_shared_tls_client) {
-        *is_reused = true;
-        return g_shared_tls_client;
-      }
+      if(tl_tls_client)
+        return tl_tls_client;
     }
     else {
-      if(!g_shared_http_client) {
-        g_shared_http_client = aoni_client_create(cfg);
+      if(!tl_http_client) {
+        tl_http_client = aoni_client_create(cfg);
       }
-      pthread_mutex_unlock(&g_client_pool_lock);
-      if(g_shared_http_client) {
-        *is_reused = true;
-        return g_shared_http_client;
-      }
+      if(tl_http_client)
+        return tl_http_client;
     }
   }
   return aoni_client_create(cfg);
@@ -116,10 +126,11 @@ CURLcode Curl_aoni_perform(struct Curl_easy *data)
   const char *proxy_url;
   struct curl_slist *h;
   char *headers_buf = NULL;
-  size_t headers_cap = 4096;
+  size_t headers_cap = AO_SCRATCH_HDR_CAP;
   size_t headers_len = 0;
+  bool heap_headers = false;
   uint8_t *resp_hdr_buf = NULL;
-  size_t resp_hdr_cap = 8192;
+  size_t resp_hdr_cap = AO_SCRATCH_RESP_HDR_CAP;
   aoni_config_t cfg;
   aoni_client_t client;
   aoni_task_t task;
@@ -135,7 +146,7 @@ CURLcode Curl_aoni_perform(struct Curl_easy *data)
   if(!url || !*url)
     return CURLE_URL_MALFORMAT;
 
-  /* 1. Initialize aoni client configuration with uTLS Chrome evasion */
+  /* 1. Initialize aoni client configuration */
   memset(&cfg, 0, sizeof(cfg));
   cfg.max_conns_per_host = (uint32_t)data->set.maxconnects;
   if(!cfg.max_conns_per_host)
@@ -158,7 +169,16 @@ CURLcode Curl_aoni_perform(struct Curl_easy *data)
     cfg.proxy_url = (char *)(uintptr_t)proxy_url;
   }
 
-  client = ao_get_client(&cfg, is_tls, &is_reused);
+  /* Thread-local client reuse - lock-free */
+  if(!cfg.proxy_url) {
+    client = Curl_aoni_get_thread_client(&cfg, is_tls);
+    is_reused = (client != NULL);
+  }
+  else {
+    client = aoni_client_create(&cfg);
+    is_reused = false;
+  }
+
   if(!client)
     return CURLE_OUT_OF_MEMORY;
 
@@ -171,20 +191,27 @@ CURLcode Curl_aoni_perform(struct Curl_easy *data)
   else if(data->set.opt_no_body)
     method = "HEAD";
 
-  /* 3. Serialize headers from curl_slist into raw CRLF stream */
-  headers_buf = (char *)malloc(headers_cap);
-  if(!headers_buf) {
-    aoni_client_destroy(client);
-    return CURLE_OUT_OF_MEMORY;
-  }
+  /* 3. Serialize headers - Fast path using Thread-Local scratch buffer */
+  headers_buf = tl_scratch.req_headers;
   headers_buf[0] = '\0';
+  headers_len = 0;
 
   for(h = data->set.headers; h; h = h->next) {
     if(h->data && *h->data) {
       size_t line_len = strlen(h->data);
       if(headers_len + line_len + 4 >= headers_cap) {
         size_t new_cap = (headers_cap + line_len + 4) * 2;
-        char *new_buf = (char *)realloc(headers_buf, new_cap);
+        char *new_buf = NULL;
+        if(!heap_headers) {
+          new_buf = (char *)malloc(new_cap);
+          if(new_buf) {
+            memcpy(new_buf, headers_buf, headers_len);
+            heap_headers = true;
+          }
+        }
+        else {
+          new_buf = (char *)realloc(headers_buf, new_cap);
+        }
         if(!new_buf)
           break;
         headers_buf = new_buf;
@@ -198,15 +225,10 @@ CURLcode Curl_aoni_perform(struct Curl_easy *data)
     }
   }
 
-  /* 4. Allocate response headers buffer */
-  resp_hdr_buf = (uint8_t *)malloc(resp_hdr_cap);
-  if(!resp_hdr_buf) {
-    free(headers_buf);
-    aoni_client_destroy(client);
-    return CURLE_OUT_OF_MEMORY;
-  }
+  resp_hdr_buf = tl_scratch.resp_headers;
+  resp_hdr_cap = sizeof(tl_scratch.resp_headers);
 
-  /* 5. Populate aoni task descriptor */
+  /* 4. Populate aoni task descriptor */
   memset(&task, 0, sizeof(task));
   task.task_id = 1;
   task.method = (char *)(uintptr_t)method;
@@ -225,24 +247,24 @@ CURLcode Curl_aoni_perform(struct Curl_easy *data)
       task.body_len = strlen((const char *)data->set.postfields);
   }
 
-  /* Mode 2: Dynamic Off-Heap auto-allocation (resp_buf_ptr = NULL) */
+  /* Response buffers: Use Mode 3 (Off-Heap auto-allocation) for arbitrary response body size */
   task.resp_buf_ptr = NULL;
   task.resp_buf_cap = 0;
   task.resp_headers_ptr = resp_hdr_buf;
   task.resp_headers_cap = resp_hdr_cap;
 
-  /* 6. Execute request over aoni reactor */
+  /* 5. Execute request over aoni reactor */
   status = aoni_client_do(client, &task);
 
   if(status > 0) {
     data->info.httpcode = task.status_code;
 
-    /* Deliver response headers to curl callbacks / file */
+    /* Deliver response headers */
     if(task.resp_headers_len > 0 && task.resp_headers_ptr) {
       result = ao_deliver_headers(data, task.resp_headers_ptr, task.resp_headers_len);
     }
 
-    /* Deliver response body to curl callbacks / file */
+    /* Deliver response body */
     if(!result && task.resp_buf_len > 0 && task.resp_buf_ptr) {
       result = ao_deliver_body(data, task.resp_buf_ptr, task.resp_buf_len);
     }
@@ -256,12 +278,28 @@ CURLcode Curl_aoni_perform(struct Curl_easy *data)
       result = CURLE_COULDNT_CONNECT;
   }
 
-  /* 7. Cleanup offheap memory & resources */
+  /* 6. Cleanup */
   aoni_task_free(&task);
-  free(headers_buf);
-  free(resp_hdr_buf);
+  if(heap_headers && headers_buf)
+    free(headers_buf);
   if(!is_reused)
     aoni_client_destroy(client);
 
   return result;
+}
+
+CURLcode Curl_aoni_batch_perform(struct Curl_easy **data_array, size_t count)
+{
+  size_t i;
+  if(!data_array || count == 0)
+    return CURLE_OK;
+
+  for(i = 0; i < count; i++) {
+    if(data_array[i]) {
+      CURLcode rc = Curl_aoni_perform(data_array[i]);
+      if(rc != CURLE_OK)
+        return rc;
+    }
+  }
+  return CURLE_OK;
 }
